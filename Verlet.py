@@ -1,6 +1,7 @@
 import numpy as np
 from Heating  import *
 from Beams import *
+from numba import njit, prange
 
 from tqdm import trange
 
@@ -255,3 +256,81 @@ def verlet_up_to(
             break
     return xs_curr, v_curr
 
+@njit
+def gaussian_acc_numba(x, lambda_b, w0_b, g, as_zeta):
+    """
+    An single-function-call Numba-jitted version of the Gaussian beam acceleration to test speedups.
+    x: (2, N) array [rho, zeta]
+    returns: (2, N) array [a_rho, a_zeta]
+    """
+    rho = x[0]
+    zeta = x[1]
+    b = 1.0 / (1.0 + zeta * zeta)
+
+    I = b * np.exp(-2.0 * b * rho * rho)
+    pref = (lambda_b * lambda_b) / (np.pi * np.pi * w0_b * w0_b)
+    du_drho = 4.0 * b * rho * I
+
+    du_dzeta = pref * 2.0 * b * zeta * (1.0 - 2.0 * b * rho * rho) * I
+
+    acc_rho = -du_drho
+    acc_zeta = -du_dzeta - g / as_zeta
+
+    out = np.empty_like(x)
+    out[0] = acc_rho
+    out[1] = acc_zeta
+    return out
+
+@njit
+def verlet_gaussian_numba(x0, v0, dt, steps, lambda_b, w0_b, g, as_zeta):
+    """
+    Velocity-Verlet integrator JIT-compiled with Numba.
+    Uses analytic Gaussian acceleration.
+
+    x0, v0: (2, N)
+    returns: xs, vs, ts
+    """
+    N = x0.shape[1]
+
+    xs = np.zeros((steps + 1, 2, N))
+    vs = np.zeros((steps + 1, 2, N))
+    ts = np.zeros(steps + 1)
+
+    xs[0] = x0
+    vs[0] = v0
+    ts[0] = 0.0
+
+    # First step (Taylor)
+    a0 = gaussian_acc_numba(xs[0], lambda_b, w0_b, g, as_zeta)
+    xs[1] = xs[0] + v0 * dt + 0.5 * a0 * dt * dt
+    ts[1] = dt
+
+    for i in range(1, steps):
+        t = (i + 1) * dt
+        ts[i+1] = t
+
+        z = xs[i, 1]
+        active = z > 0.0
+
+        a = gaussian_acc_numba(xs[i], lambda_b, w0_b, g, as_zeta)
+
+        xs[i+1] = xs[i]
+        vs[i] = vs[i-1]
+
+        for j in prange(N):
+            if active[j]:
+                xs[i+1, 0, j] = xs[i, 0, j] + (xs[i, 0, j] - xs[i-1, 0, j] + a[0, j] * dt * dt)
+                xs[i+1, 1, j] = xs[i, 1, j] + (xs[i, 1, j] - xs[i-1, 1, j] + a[1, j] * dt * dt)
+
+                vs[i, 0, j] = (xs[i+1, 0, j] - xs[i-1, 0, j]) / (2.0 * dt)
+                vs[i, 1, j] = (xs[i+1, 1, j] - xs[i-1, 1, j]) / (2.0 * dt)
+
+    last_z = xs[-1, 1]
+    last_active = last_z > 0.0
+    vs[-1] = vs[-2]
+    for j in prange(N):
+        if last_active[j]:
+            vs[-1, 0, j] = (xs[-1, 0, j] - xs[-2, 0, j]) / dt
+            vs[-1, 1, j] = (xs[-1, 1, j] - xs[-2, 1, j]) / dt
+
+    return xs, vs, ts
