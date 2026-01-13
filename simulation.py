@@ -221,16 +221,28 @@ def simulation(
         HEATING=HEATING
     )
 
-    res = verlet(
-        x0=x_prepared,
-        v0=v_prepared,
-        a_func=beam.acc,
-        dt=dt,
-        N_steps=N_steps,
-        N_saves=N_save, # new param!
-        beam=beam,
-        HEATING=HEATING
-    )
+    if True:
+        res = verlet(
+            x0=x_prepared,
+            v0=v_prepared,
+            a_func=beam.acc,
+            dt=dt,
+            N_steps=N_steps,
+            N_saves=N_save, # new param!
+            beam=beam,
+            HEATING=HEATING
+        )
+    else:
+        res = verlet_gaussian_numba(
+            x0=x_prepared,
+            v0=v_prepared,
+            dt=dt,
+            N_steps=N_steps,
+            N_saves=N_save,  # new param!
+            beam=beam,
+            HEATING=HEATING,
+        )
+
         
     # Save data and parameters
     save_data(res, 
@@ -322,11 +334,13 @@ if __name__ == '__main__':
         # tune these bounds / resolutions as needed
         beam.enable_intensity_lut(
             rho_max=2.0,    # dimensionless rho range you care about
-            Nrho=10000,
+            Nrho=100,
             zeta_min=0.0,   # use negative if particles explore zeta < 0
             zeta_max=2.0,
-            Nzeta=10000,
+            Nzeta=100,
         ) # with this LUT complexity, in 3D we would obtain a 500x500x500 grid
+        beam.disable_intensity_lut()
+        
     # exit()
     except Exception as e:
         print("\nUsage: python ./simulation.py <T> <dMOT> <Beam> <P_b> <HEATING>\n")

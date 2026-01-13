@@ -1,6 +1,7 @@
 import numpy as np
 from Heating  import *
 from Beams import *
+from Dynamics import * # I don't like to import all these variables as they were global
 from numba import njit, prange
 
 from tqdm import trange
@@ -281,56 +282,203 @@ def gaussian_acc_numba(x, lambda_b, w0_b, g, as_zeta):
     out[1] = acc_zeta
     return out
 
-@njit
-def verlet_gaussian_numba(x0, v0, dt, steps, lambda_b, w0_b, g, as_zeta):
-    """
-    Velocity-Verlet integrator JIT-compiled with Numba.
-    Uses analytic Gaussian acceleration.
+import numpy as np
+from numba import njit, prange
 
-    x0, v0: (2, N)
-    returns: xs, vs, ts
+# Assuming you already have something like:
+# @njit(parallel=True)
+# def gaussian_acc_numba(x, lambda_b, w0_b, g, as_zeta):
+#     ...
+
+
+def verlet_gaussian_numba(
+    x0,
+    v0,
+    dt,
+    N_steps,
+    N_saves,
+    beam,
+    HEATING=False,
+    progress=True,
+):
     """
+    Wrapper around the Numba core that takes a `beam` object instead of
+    individual beam parameters, and keeps the same call pattern as `verlet`.
+
+    Parameters
+    ----------
+    x0, v0 : (2, N) arrays
+    dt : float
+    N_steps : int
+    N_saves : int
+    beam : GaussianBeam-like
+        Must provide attributes: lambda_b, w0_b, g, as_zeta.
+    HEATING : bool
+        Currently ignored (not implemented in Numba version).
+    progress : bool
+        Ignored (no tqdm inside Numba version).
+
+    Returns
+    -------
+    xs_save, vs_save, ts_save
+    """
+
+    x0 = np.asarray(x0, dtype=np.float64)
+    v0 = np.asarray(v0, dtype=np.float64)
+
     N = x0.shape[1]
+    if v0.shape != x0.shape:
+        raise ValueError("x0 and v0 must have the same shape (2, N)")
 
-    xs = np.zeros((steps + 1, 2, N))
-    vs = np.zeros((steps + 1, 2, N))
-    ts = np.zeros(steps + 1)
+    if N_saves < 1:
+        raise ValueError("N_saves must be at least 1")
 
-    xs[0] = x0
-    vs[0] = v0
-    ts[0] = 0.0
+    # Choose which steps to save (0..N_steps)
+    save_indices = np.linspace(0, N_steps, N_saves, dtype=np.int64)
+    save_indices = np.unique(save_indices)
 
-    # First step (Taylor)
-    a0 = gaussian_acc_numba(xs[0], lambda_b, w0_b, g, as_zeta)
-    xs[1] = xs[0] + v0 * dt + 0.5 * a0 * dt * dt
-    ts[1] = dt
+    if HEATING:
+        # up to you: raise, warn, or silently ignore
+        import warnings
+        warnings.warn("HEATING=True is ignored in verlet_gaussian_numba (Numba version).")
 
-    for i in range(1, steps):
-        t = (i + 1) * dt
-        ts[i+1] = t
+    return _verlet_gaussian_numba_core(
+        x0,
+        v0,
+        dt,
+        N_steps,
+        save_indices,
+        beam.lambda_b,
+        beam.w0_b,
+        g,
+        beam.as_zeta,
+    )
 
-        z = xs[i, 1]
-        active = z > 0.0
 
-        a = gaussian_acc_numba(xs[i], lambda_b, w0_b, g, as_zeta)
+@njit(parallel=True)
+def _verlet_gaussian_numba_core(
+    x0,
+    v0,
+    dt,
+    N_steps,
+    save_indices,
+    lambda_b,
+    w0_b,
+    g,
+    as_zeta,
+):
 
-        xs[i+1] = xs[i]
-        vs[i] = vs[i-1]
+    N = x0.shape[1]
+    n_saves = save_indices.shape[0]
 
-        for j in prange(N):
-            if active[j]:
-                xs[i+1, 0, j] = xs[i, 0, j] + (xs[i, 0, j] - xs[i-1, 0, j] + a[0, j] * dt * dt)
-                xs[i+1, 1, j] = xs[i, 1, j] + (xs[i, 1, j] - xs[i-1, 1, j] + a[1, j] * dt * dt)
+    xs_save = np.zeros((n_saves, 2, N), dtype=np.float64)
+    vs_save = np.zeros((n_saves, 2, N), dtype=np.float64)
+    ts_save = np.zeros(n_saves, dtype=np.float64)
 
-                vs[i, 0, j] = (xs[i+1, 0, j] - xs[i-1, 0, j]) / (2.0 * dt)
-                vs[i, 1, j] = (xs[i+1, 1, j] - xs[i-1, 1, j]) / (2.0 * dt)
+    xs_prev = np.empty_like(x0)
+    xs_curr = np.empty_like(x0)
+    v_prev = np.empty_like(v0)
+    v_curr = np.empty_like(v0)
 
-    last_z = xs[-1, 1]
-    last_active = last_z > 0.0
-    vs[-1] = vs[-2]
-    for j in prange(N):
-        if last_active[j]:
-            vs[-1, 0, j] = (xs[-1, 0, j] - xs[-2, 0, j]) / dt
-            vs[-1, 1, j] = (xs[-1, 1, j] - xs[-2, 1, j]) / dt
+    # init buffers
+    for j in range(2):
+        for k in range(N):
+            xs_prev[j, k] = x0[j, k]
+            v_prev[j, k] = v0[j, k]
 
-    return xs, vs, ts
+    a0 = gaussian_acc_numba(xs_prev, lambda_b, w0_b, g, as_zeta)
+
+    for j in range(2):
+        for k in range(N):
+            xs_curr[j, k] = xs_prev[j, k] + v_prev[j, k] * dt + 0.5 * a0[j, k] * dt * dt
+            v_curr[j, k] = v_prev[j, k]
+
+    t = 0.0
+    step = 0
+
+    save_ptr = 0
+    next_save_step = save_indices[0]
+
+    # save step 0
+    if step == next_save_step:
+        for j in range(2):
+            for k in range(N):
+                xs_save[save_ptr, j, k] = xs_prev[j, k]
+                vs_save[save_ptr, j, k] = v_prev[j, k]
+        ts_save[save_ptr] = t
+        save_ptr += 1
+        if save_ptr < n_saves:
+            next_save_step = save_indices[save_ptr]
+
+    # main loop
+    for step in range(1, N_steps):
+        update = np.empty(N, dtype=np.bool_)
+        for k in range(N):
+            update[k] = xs_curr[1, k] > 0.0
+
+        a = gaussian_acc_numba(xs_curr, lambda_b, w0_b, g, as_zeta)
+
+        xs_next = np.empty_like(xs_curr)
+
+        for k in prange(N):
+            if update[k]:
+                xs_next[0, k] = xs_curr[0, k] + (
+                    xs_curr[0, k] - xs_prev[0, k] + a[0, k] * dt * dt
+                )
+                xs_next[1, k] = xs_curr[1, k] + (
+                    xs_curr[1, k] - xs_prev[1, k] + a[1, k] * dt * dt
+                )
+            else:
+                xs_next[0, k] = xs_curr[0, k]
+                xs_next[1, k] = xs_curr[1, k]
+
+        for k in prange(N):
+            if update[k]:
+                v_curr[0, k] = (xs_next[0, k] - xs_prev[0, k]) / (2.0 * dt)
+                v_curr[1, k] = (xs_next[1, k] - xs_prev[1, k]) / (2.0 * dt)
+            else:
+                v_curr[0, k] = 0.0
+                v_curr[1, k] = 0.0
+
+        t = step * dt
+
+        if step == next_save_step and save_ptr < n_saves:
+            for j in range(2):
+                for k in range(N):
+                    xs_save[save_ptr, j, k] = xs_curr[j, k]
+                    vs_save[save_ptr, j, k] = v_curr[j, k]
+            ts_save[save_ptr] = t
+            save_ptr += 1
+            if save_ptr < n_saves:
+                next_save_step = save_indices[save_ptr]
+
+        xs_prev, xs_curr = xs_curr, xs_next
+        for j in range(2):
+            for k in range(N):
+                v_prev[j, k] = v_curr[j, k]
+
+    # final velocity via forward difference
+    update_final = np.empty(N, dtype=np.bool_)
+    for k in range(N):
+        update_final[k] = xs_curr[1, k] > 0.0
+
+    v_final = np.zeros_like(v_curr)
+    for k in prange(N):
+        if update_final[k]:
+            v_final[0, k] = (xs_curr[0, k] - xs_prev[0, k]) / dt
+            v_final[1, k] = (xs_curr[1, k] - xs_prev[1, k]) / dt
+        else:
+            v_final[0, k] = 0.0
+            v_final[1, k] = 0.0
+
+    final_step = N_steps
+    t_final = final_step * dt
+    if save_ptr < n_saves and final_step == save_indices[save_ptr]:
+        for j in range(2):
+            for k in range(N):
+                xs_save[save_ptr, j, k] = xs_curr[j, k]
+                vs_save[save_ptr, j, k] = v_final[j, k]
+        ts_save[save_ptr] = t_final
+        save_ptr += 1
+
+    return xs_save, vs_save, ts_save
