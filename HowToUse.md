@@ -1,78 +1,31 @@
-## 🚀 Example: Running and Analyzing a Simulation
 
-Suppose you want to simulate the capture of **Rb atoms at T = 15 µK** with a **MOT–fiber distance dMOT = 5 mm**.
+### Using a 3D field grid as acceleration source
 
-### Step 1 — Run the simulation
-```bash
-python simulation.py 15 5
-````
+If you have a 3D Cartesian intensity grid saved as a `.npz` with arrays `x`, `y`, `z`
+(1D axes) and `I` (shape `(Nx, Ny, Nz)`), you can build an acceleration LUT and
+pass it to the Verlet solver:
 
-This will:
+```python
+from FieldLUT import FieldLUT3D
+from Verlet import verlet
 
-* Generate **N = 1e5 atoms** initially distributed in the MOT.
-* Evolve their trajectories under the optical dipole potential (Gaussian beam exiting the fiber).
-* Save results in:
+field = FieldLUT3D.from_intensity_file(
+    "path/to/field.npz",
+    acc_scale=1.0,
+    max_points=200**3,
+    dtype=np.float32,
+)
 
-  ```
-  ./data/res_T=15uK_dMOT=5mm/
-  ├── positions.npy
-  ├── velocities.npy
-  └── times.npy
-  ```
-
----
-
-### Step 2 — Analyze the results
-
-```bash
-python analysis.py 15 5
+xs, vs, ts = verlet(
+    x0=x0,
+    v0=v0,
+    a_func=field.acc,
+    dt=dt,
+    N_steps=N_steps,
+    N_saves=N_saves,
+    z_index=2,
+)
 ```
 
-This produces two plots:
-
-1. **Capture fraction vs time** (percentage of atoms reaching the fiber core).
-2. **Radial density distribution** at the fiber, compared with the initial MOT distribution.
-
-Both plots are displayed interactively and can be saved manually.
-
----
-
-### Step 3 — Run multiple simulations (parameter scan)
-
-```bash
-python run_multiple_simul.py
-```
-
-By default:
-
-* Temperatures: 5, 10, 15, 20, 25, 30 µK
-* MOT distances: 4, 8, 12, 16, 20 mm
-
-This generates simulation data for each parameter set.
-
----
-
-### Step 4 — Batch analysis and plots
-
-```bash
-python analysis_multiple_siml.py
-```
-
-This script automatically produces summary plots across all simulations:
-
-* **Capture fraction vs time** (different curves for different T or dMOT).
-* **Radial density distributions** at the fiber for different conditions.
-
-The plots are saved in `./img/`.
-
----
-
-### Typical Output
-
-Example capture fraction plot:
-
-![Capture Fraction Example](./img/cap_frac_example.jpg)
-
-Example density distribution at the fiber:
-
-![Density Example](./img/density_at_fib_example.jpg)
+`acc_scale` should convert the intensity gradient to the acceleration units you
+want to integrate.

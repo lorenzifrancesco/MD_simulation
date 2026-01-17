@@ -4,6 +4,33 @@ from Beams import *
 
 from tqdm import trange
 
+def _coerce_state(x0, v0):
+    x0 = np.asarray(x0, dtype=float)
+    v0 = np.asarray(v0, dtype=float)
+
+    if x0.ndim == 1:
+        x0 = x0[:, None]
+    if v0.ndim == 1:
+        v0 = v0[:, None]
+    if x0.ndim != 2 or v0.ndim != 2:
+        raise ValueError("x0 and v0 must have shape (D, N)")
+    if x0.shape != v0.shape:
+        raise ValueError("x0 and v0 must have the same shape")
+    return x0, v0
+
+
+def _active_mask(xs, z_index):
+    if z_index is None:
+        return np.ones(xs.shape[1], dtype=bool)
+    return xs[z_index] > 0.0
+
+
+def _below_zmin(xs, z_index, z_min):
+    if z_index is None:
+        return False
+    return np.min(xs[z_index]) < z_min
+
+
 def Heating_1(xs, vs, dt, i, beam=GaussianBeam()):
     sigma_i_rho, sigma_i_zeta = np.std(vs[i], axis=1) # std across atoms
     r_atoms = xs[i]
@@ -35,6 +62,7 @@ def verlet(
     beam=GaussianBeam(),
     HEATING=False,
     progress=True,
+    z_index=1,
 ):
     """
     Integrate atomic motion using the velocity-Verlet scheme, storing only
@@ -46,16 +74,14 @@ def verlet(
 
     Parameters
     ----------
-    x0 : (2,) array_like or (2, N) ndarray
-        Initial positions in dimensionless units:
-        - x[0] = ρ (radial coordinate in w0 units)
-        - x[1] = ζ (axial coordinate in zR units).
-        Supports single-particle or multi-particle arrays.
-    v0 : (2,) array_like or (2, N) ndarray
+    x0 : (D,) array_like or (D, N) ndarray
+        Initial positions in dimensionless units for D coordinates.
+        For cylindrical runs: x[0] = rho, x[1] = zeta.
+    v0 : (D,) array_like or (D, N) ndarray
         Initial velocities in dimensionless units.
     a_func : callable
         Function of the form `a_func(x)` returning acceleration components
-        (aρ, aζ) at position `x`. Must support vectorized input.
+        Must return accelerations with the same shape as `x`.
     dt : float
         Time step (dimensionless units).
     N_steps : int
@@ -68,12 +94,15 @@ def verlet(
         If True, apply Heating_2 at each step (default: False).
     progress : bool, optional
         If True, display a tqdm progress bar (default: True).
+    z_index : int or None, optional
+        Index of the coordinate used for the z > 0 boundary condition.
+        Set to None to disable boundary masking (default: 1).
 
     Returns
     -------
-    xs : ndarray, shape (N_saves, 2, N)
+    xs : ndarray, shape (N_saves, D, N)
         Atomic positions at saved time steps.
-    vs : ndarray, shape (N_saves, 2, N)
+    vs : ndarray, shape (N_saves, D, N)
         Atomic velocities at saved time steps.
     ts : ndarray, shape (N_saves,)
         Dimensionless time values at saved time steps.
@@ -81,15 +110,13 @@ def verlet(
     Notes
     -----
     - Uses a Taylor expansion for the first step.
-    - Enforces boundary condition: motion only for ζ > 0.
+    - Enforces boundary condition: motion only where z_index > 0.
     - Velocities are estimated via central differences for internal steps
       and via a forward difference for the final step (as in the original).
     """
 
-    x0 = np.asarray(x0, dtype=float)
-    v0 = np.asarray(v0, dtype=float)
-
-    N = x0.shape[1]
+    x0, v0 = _coerce_state(x0, v0)
+    dim, N = x0.shape
 
     # Decide which step indices we will save:
     # steps from 0..N_steps, we want N_saves snapshots spread across them.
@@ -98,7 +125,7 @@ def verlet(
     save_indices = np.unique(save_indices)  # just in case we have repeated indices
 
     # Pre-allocate only the saved snapshots
-    xs_save = np.zeros((len(save_indices), 2, N), dtype=float)
+    xs_save = np.zeros((len(save_indices), dim, N), dtype=float)
     vs_save = np.zeros_like(xs_save)
     ts_save = np.zeros(len(save_indices), dtype=float)
 
@@ -134,8 +161,7 @@ def verlet(
         # We will compute x_{step+1} and v_{step} via central difference.
 
         # Boundary mask (only atoms with z > 0 evolve)
-        z = xs_curr[1]
-        update = z > 0.0
+        update = _active_mask(xs_curr, z_index)
 
         a = a_func(xs_curr)
 
@@ -165,8 +191,7 @@ def verlet(
 
     # After the loop, xs_curr holds x_{N_steps}, xs_prev holds x_{N_steps-1}
     # We compute the final velocity via forward difference (as in your original code):
-    z_final = xs_curr[1]
-    update_final = z_final > 0.0
+    update_final = _active_mask(xs_curr, z_index)
     v_final = (xs_curr - xs_prev) / dt * update_final
 
     # Save final state if N_steps is among requested save_indices
@@ -190,6 +215,7 @@ def verlet_up_to(
     z_min=5.0,
     HEATING=False,
     beam=None,
+    z_index=1,
 ):
     """
     Integrate atomic motion using a position-form velocity-Verlet scheme
@@ -197,44 +223,42 @@ def verlet_up_to(
 
     Parameters
     ----------
-    x0 : (2,) array_like or (2, N) ndarray
-        Initial positions in dimensionless units:
-        - x[0] = ρ (radial coordinate in w0 units)
-        - x[1] = ζ (axial coordinate in zR units).
-        Supports single-particle or multi-particle arrays.
-    v0 : (2,) array_like or (2, N) ndarray
+    x0 : (D,) array_like or (D, N) ndarray
+        Initial positions in dimensionless units.
+    v0 : (D,) array_like or (D, N) ndarray
         Initial velocities in dimensionless units.
     a_func : callable
         Function of the form `a_func(x)` returning acceleration components
-        (aρ, aζ) at position `x`. Must support vectorized input.
+        Must return accelerations with the same shape as `x`.
     dt : float
         Time step (dimensionless units).
     N_steps : int
         Maximum number of integration steps.
     z_min : float, optional
-        Stopping condition: stop integration when any atom reaches ζ < z_min.
+        Stopping condition: stop integration when any atom reaches z < z_min.
     HEATING : bool, optional
         If True, apply Heating_2 at each step (default: False).
     beam : Beam, optional
         Beam object to pass to Heating_2 if HEATING=True.
+    z_index : int or None, optional
+        Index of the coordinate used for the z_min condition.
+        Set to None to disable early stopping (default: 1).
 
     Returns
     -------
-    x_final : ndarray, shape (2, N)
+    x_final : ndarray, shape (D, N)
         Final atomic positions.
-    v_final : ndarray, shape (2, N)
+    v_final : ndarray, shape (D, N)
         Final atomic velocities.
     """
-    x0 = np.asarray(x0, dtype=float)
-    v0 = np.asarray(v0, dtype=float)
-
+    x0, v0 = _coerce_state(x0, v0)
     xs_prev = x0.copy()
 
     a0 = a_func(xs_prev)
     xs_curr = xs_prev + v0 * dt + 0.5 * a0 * dt * dt
     v_curr = v0.copy()
 
-    if np.min(xs_curr[1]) < z_min:
+    if _below_zmin(xs_curr, z_index, z_min):
         return xs_curr, v_curr
 
     for step in range(1, N_steps):
@@ -251,7 +275,6 @@ def verlet_up_to(
             v_curr = Heating_2(xs_fake, vs_fake, dt, 0, beam)
         xs_prev, xs_curr = xs_curr, xs_next
 
-        if np.min(xs_curr[1]) < z_min:
+        if _below_zmin(xs_curr, z_index, z_min):
             break
     return xs_curr, v_curr
-
