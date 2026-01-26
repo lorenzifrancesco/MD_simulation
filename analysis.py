@@ -4,26 +4,97 @@ from matplotlib import colormaps
 import matplotlib as mpl
 import os
 import re
+import h5py
+from scipy.ndimage import map_coordinates
 from Beams import beams
 from Heating import GetTemperature
 from GifsMaker import MakeGif_density
 
-def  data_fname(T, dMOT, beam_name, middle_folder=''):
-    
-    res_fname = f'res_T={T:.0f}uK_dMOT={dMOT:.0f}mm/'
+mpl.rcParams["text.usetex"] = False
 
-    if middle_folder=='':
-        simul_path =  data_folder + f'{beam_name}/{res_fname}'
-        if os.path.exists(simul_path):
-            return simul_path
-        else:
-            print(f'No simulation present at {simul_path}')
+USE_LUT_INTENSITY = False
+LUT_H5_PATH = "input/field_data.h5"
+LUT_VERBOSE = False
+PLOT_MODE = "save"
+PLOT_DIR = "media"
+
+
+def _finalize_plot(name):
+    mode = PLOT_MODE
+    if mode not in ("save", "show", "both"):
+        raise ValueError("PLOT_MODE must be 'save', 'show', or 'both'")
+    if mode in ("save", "both"):
+        os.makedirs(PLOT_DIR, exist_ok=True)
+        out_path = os.path.join(PLOT_DIR, f"{name}.png")
+        plt.savefig(out_path, dpi=200)
+        print(f"Saved plot to {out_path}")
+    if mode in ("show", "both"):
+        plt.show()
+    plt.close()
+
+def data_fname(T, dMOT, beam_name, middle_folder=''):
+    res_fname = f'res_T={T:.0f}uK_dMOT={dMOT:.0f}mm/'
+    if middle_folder == '':
+        simul_path = data_folder + f'{beam_name}/{res_fname}'
     else:
         simul_path = data_folder + f'{beam_name}/{middle_folder}/{res_fname}/'
-        if os.path.exists(simul_path):
-            return simul_path
-        else:
-            print(f'No simulation present at {simul_path}')
+    if os.path.exists(simul_path):
+        return simul_path
+    print(f'No simulation present at {simul_path}')
+
+
+def _lut_intensity_grid(rho_array, zeta_array, beam, simul_path):
+    r_ref = GetParam(simul_path, param="r_ref")
+    if r_ref is None:
+        raise ValueError("r_ref not found in parameters.txt")
+
+    s_r = beam.w0_b / r_ref
+    s_z = beam.zR / r_ref
+
+    rho_array = np.asarray(rho_array, dtype=float)
+    zeta_array = np.asarray(zeta_array, dtype=float)
+    x_field = np.abs(rho_array) * s_r
+    z_field = zeta_array * s_z
+
+    with h5py.File(LUT_H5_PATH, "r") as f:
+        axis_scale = float(f.attrs.get("axis_scale", 1.0))
+        if LUT_VERBOSE and not getattr(_lut_intensity_grid, "_logged", False):
+            _lut_intensity_grid._logged = True
+            print(
+                "LUT intensity enabled:",
+                f"path={LUT_H5_PATH}, axis_scale={axis_scale}, r_ref={r_ref:.3g}",
+            )
+        z_axis = np.asarray(f["domain/z"][:], dtype=float) * axis_scale
+        fields_group = f["fields"]
+
+        intensity_xz = np.empty((z_axis.size, x_field.size), dtype=float)
+        for idx in range(z_axis.size):
+            g = fields_group[f"z_{idx:05d}"]
+            x = np.asarray(g["x"][:], dtype=float) * axis_scale
+            y = np.asarray(g["y"][:], dtype=float) * axis_scale
+            intensity = np.asarray(g["intensity"][:], dtype=float)
+
+            dx = x[1] - x[0]
+            dy = y[1] - y[0]
+            ix = (x_field - x[0]) / dx
+            iy0 = (0.0 - y[0]) / dy
+            coords = np.vstack([ix, np.full_like(ix, iy0)])
+            intensity_xz[idx, :] = map_coordinates(
+                intensity,
+                coords,
+                order=1,
+                mode="constant",
+                cval=0.0,
+                prefilter=False,
+            )
+
+    intensity = np.empty((z_field.size, x_field.size), dtype=float)
+    for j in range(x_field.size):
+        intensity[:, j] = np.interp(
+            z_field, z_axis, intensity_xz[:, j], left=0.0, right=0.0
+        )
+    return intensity
+
 
 def LoadTime(simul_path: str):
     """
@@ -112,7 +183,8 @@ def GetParam(simul_path: str, param: str):
     
     pattern = rf'({escaped_param}).*?:?\s*([+-]?\d+\.?\d*(?:[Ee][+-]?\d+)?)'
 
-    simul_path = data_fname(T, dMOT, beam_name)
+    if simul_path is None:
+        simul_path = data_fname(T, dMOT, beam_name)
     file_content = get_file_content(simul_path + 'parameters.txt')
 
     match = re.search(pattern, file_content, re.IGNORECASE)
@@ -663,9 +735,12 @@ def plot_density(simul_path: str, n, rho_array, zeta_array):
     fig.colorbar(cp, ax=ax, label="Atomic Density")
 
     # beam intensity (normalized)
-    rho_dim = R / (beam.w0_b * 1e3)
-    zeta_dim = Z / (beam.zR * 1e3)
-    I = beam.intensity(rho_dim, zeta_dim)
+    if USE_LUT_INTENSITY:
+        I = _lut_intensity_grid(rho_array, zeta_array, beam, simul_path)
+    else:
+        rho_dim = R / (beam.w0_b * 1e3)
+        zeta_dim = Z / (beam.zR * 1e3)
+        I = beam.intensity(rho_dim, zeta_dim)
     I = I / I.max()
 
     # overlay with alpha
@@ -716,9 +791,7 @@ def plot_temperature(simul_path: str):
     plt.grid()
     plt.legend()
 
-def CreateGif_desnity(T: float, dMOT: float, beam: Beam, middle_folder='', fname=''):
-
-    simul_path = data_fname(T, dMOT, beam.name, middle_folder)
+def CreateGif_desnity(simul_path: str, beam: Beam, beam_label=None):
 
     xs= LoadPosition(simul_path)
     z_max = np.max(xs[:, 1, :])
@@ -736,44 +809,83 @@ def CreateGif_desnity(T: float, dMOT: float, beam: Beam, middle_folder='', fname
     zeta_array = np.array(zeta_list)
     n_array = np.array(n_list)
 
-    print(f'Creating GIF for T = {T} uK, dMOT = {dMOT} mm, Beam = {beam_name}')
+    rho_base = rho_array[0]
+    zeta_base = zeta_array[0]
+    intensity_grid = None
+    if USE_LUT_INTENSITY:
+        intensity_grid = _lut_intensity_grid(rho_base, zeta_base, beam, simul_path)
+
+    label = beam_label if beam_label is not None else beam.name
+    print(f'Creating GIF for {label}')
     print('rho_array: ', rho_array.shape)
     print('zeta_array: ', zeta_array.shape)
     print('n_array: ', n_array.shape)
 
-    MakeGif_density(pos=np.array([rho_array, zeta_array]), density=n_array, beam=beam, file_name=f'density_gif_T={T}uK_dMOT={dMOT}mm_Beam={beam_name}')
+    MakeGif_density(
+        pos=np.array([rho_base, zeta_base]),
+        density=n_array,
+        beam=beam,
+        file_name=f'density_gif_Beam={label}',
+        intensity_grid=intensity_grid,
+        beam_label=label,
+    )
 
 if __name__ == '__main__':
 
     from sys import argv
 
     if len(argv) < 3:
-        print('Specify T, dMOT, Beam (Gauss or LG)')
+        print('Specify T, dMOT, Beam (Gauss, LG, or LUT)')
         exit()
 
     try:
         T = int(argv[1])
         dMOT = int(argv[2])
         beam_name = str(argv[3])
-        Heating = bool(argv[4])
+        if len(argv) > 4:
+            token = str(argv[4]).strip().lower()
+            if token in ("1", "true"):
+                Heating = True
+            elif token in ("0", "false", ""):
+                Heating = False
+            else:
+                raise ValueError("Heating must be True/False or 1/0")
+        else:
+            Heating = False
 
         print(f'T = {T} uK, dMOT = {dMOT} mm, beam = {beam_name}, Heating = {Heating}\n')
+
+        plot_mode = os.environ.get("PLOT_MODE", PLOT_MODE).strip().lower()
+        plot_dir = os.environ.get("PLOT_DIR", PLOT_DIR).strip()
+        if plot_dir:
+            PLOT_DIR = plot_dir
+        PLOT_MODE = plot_mode if plot_mode else PLOT_MODE
+
+        if beam_name == "LUT":
+            USE_LUT_INTENSITY = True
+            LUT_VERBOSE = True
+            LUT_H5_PATH = os.environ.get("FIELD_LUT_H5", LUT_H5_PATH)
+            if not os.path.exists(LUT_H5_PATH):
+                raise FileNotFoundError(f"LUT file not found: {LUT_H5_PATH}")
+            print(f"Analysis using LUT intensity from {LUT_H5_PATH}")
 
         simul_path = data_fname(T, dMOT, beam_name)
         if Heating:
             simul_path = data_fname(T, dMOT, beam_name, 'Heating')
+        if simul_path is None:
+            raise FileNotFoundError("Simulation folder not found; check inputs.")
 
         plot_cap_frac(simul_path)
-        plt.show()
+        _finalize_plot("cap_frac")
 
         hist_rho_step, hist_rho_init = density_at_fib(simul_path, step=-1)
         plot_initial_density_rho(hist_rho_init)
         plot_density_at_fib(hist_rho_step=hist_rho_step)
-        plt.show()
+        _finalize_plot("rho_density")
 
         plot_density_zeta_vs_t(simul_path)
         plt.ylim(0, 1)
-        plt.show()
+        _finalize_plot("zeta_vs_t")
 
         steps=np.array([-1])
         f_cap = get_frac(simul_path, steps)*100 # %
@@ -782,7 +894,7 @@ if __name__ == '__main__':
         Nt = len(LoadTime(simul_path))
         n, rho_array, zeta_array = density(simul_path, rho_min=-1.5*RMOT/w0, rho_max=1.5*RMOT/w0, zeta_min=0, zeta_max=5, step=int(Nt/3))
         plot_density(simul_path, n, rho_array, zeta_array)
-        plt.show()
+        _finalize_plot("density_contour")
 
         # plot_capfrac_vs_P(beam_name: str)
         # plot_capfrac_vs_P(beam=LGBeamL1())
@@ -797,6 +909,6 @@ if __name__ == '__main__':
         # plt.show()
 
         beam = Get_Beam(simul_path)
-        CreateGif_desnity(T, dMOT, beam)
+        CreateGif_desnity(simul_path, beam, beam_label=beam_name)
     except Exception as e:
         print(e)
