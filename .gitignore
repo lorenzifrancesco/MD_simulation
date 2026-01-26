@@ -3,5 +3,8 @@ __pycache__
 *.npy
 img
 *.txt
-Results
-benchmarks
+Results/
+benchmarks/
+media/
+input/
+.venv
