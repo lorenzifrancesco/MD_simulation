@@ -5,33 +5,14 @@ from Beams import *
 # from tqdm import trange
 
 def _coerce_state(x0, v0):
-    x0 = np.asarray(x0, dtype=float)
-    v0 = np.asarray(v0, dtype=float)
+    """
+    Convert a  or many-particle state to the integrator layout.
 
-    if x0.ndim == 1:
-        x0 = x0[:, None]
-    if v0.ndim == 1:
-        v0 = v0[:, None]
-    if x0.ndim != 2 or v0.ndim != 2:
-        raise ValueError("x0 and v0 must have shape (D, N)")
-    if x0.shape != v0.shape:
-        raise ValueError("x0 and v0 must have the same shape")
-    return x0, v0
+    The integrators expect state arrays with shape (D, N), where D is the
+    number of coordinates and N is the number of atoms. A one-dimensional
+    input is treated as one atom and reshaped from (D,) to (D, 1).
 
-
-def _active_mask(xs, z_index):
-    if z_index is None:
-        return np.ones(xs.shape[1], dtype=bool)
-    return xs[z_index] > 0.0
-
-
-def _below_zmin(xs, z_index, z_min):
-    if z_index is None:
-        return False
-    return np.min(xs[z_index]) < z_min
-
-
-def _coerce_state(x0, v0):
+    """
     x0 = np.asarray(x0, dtype=float)
     v0 = np.asarray(v0, dtype=float)
 

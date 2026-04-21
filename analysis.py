@@ -44,64 +44,6 @@ def data_fname(T, dMOT, beam_name, middle_folder=''):
     if os.path.exists(simul_path):
         return simul_path
     print(f'No simulation present at {simul_path}')
-    if os.path.exists(simul_path):
-        return simul_path
-    print(f'No simulation present at {simul_path}')
-
-
-def _lut_intensity_grid(rho_array, zeta_array, beam, simul_path):
-    r_ref = GetParam(simul_path, param="r_ref")
-    if r_ref is None:
-        raise ValueError("r_ref not found in parameters.txt")
-
-    s_r = beam.w0_b / r_ref
-    s_z = beam.zR / r_ref
-
-    rho_array = np.asarray(rho_array, dtype=float)
-    zeta_array = np.asarray(zeta_array, dtype=float)
-    x_field = np.abs(rho_array) * s_r
-    z_field = zeta_array * s_z
-
-    with h5py.File(LUT_H5_PATH, "r") as f:
-        axis_scale = float(f.attrs.get("axis_scale", 1.0))
-        if LUT_VERBOSE and not getattr(_lut_intensity_grid, "_logged", False):
-            _lut_intensity_grid._logged = True
-            print(
-                "LUT intensity enabled:",
-                f"path={LUT_H5_PATH}, axis_scale={axis_scale}, r_ref={r_ref:.3g}",
-            )
-        z_axis = np.asarray(f["domain/z"][:], dtype=float) * axis_scale
-        fields_group = f["fields"]
-
-        intensity_xz = np.empty((z_axis.size, x_field.size), dtype=float)
-        for idx in range(z_axis.size):
-            g = fields_group[f"z_{idx:05d}"]
-            x = np.asarray(g["x"][:], dtype=float) * axis_scale
-            y = np.asarray(g["y"][:], dtype=float) * axis_scale
-            intensity = np.asarray(g["intensity"][:], dtype=float)
-
-            dx = x[1] - x[0]
-            dy = y[1] - y[0]
-            ix = (x_field - x[0]) / dx
-            iy0 = (0.0 - y[0]) / dy
-            coords = np.vstack([ix, np.full_like(ix, iy0)])
-            intensity_xz[idx, :] = map_coordinates(
-                intensity,
-                coords,
-                order=1,
-                mode="constant",
-                cval=0.0,
-                prefilter=False,
-            )
-
-    intensity = np.empty((z_field.size, x_field.size), dtype=float)
-    for j in range(x_field.size):
-        intensity[:, j] = np.interp(
-            z_field, z_axis, intensity_xz[:, j], left=0.0, right=0.0
-        )
-    return intensity
-
-
 
 def _lut_intensity_grid(rho_array, zeta_array, beam, simul_path):
     r_ref = GetParam(simul_path, param="r_ref")
@@ -854,7 +796,8 @@ def plot_temperature(simul_path: str):
 
 def CreateGif_density(T: float, dMOT: float, beam: Beam, middle_folder='', fname=''):
 
-    simul_path = data_fname(T, dMOT, beam.name, middle_folder)
+    label = "LUT" if USE_LUT_INTENSITY else beam.name
+    simul_path = data_fname(T, dMOT, label, middle_folder)
 
     xs= LoadPosition(simul_path)
     z_max = np.max(xs[:, 1, :])
@@ -878,7 +821,6 @@ def CreateGif_density(T: float, dMOT: float, beam: Beam, middle_folder='', fname
     if USE_LUT_INTENSITY:
         intensity_grid = _lut_intensity_grid(rho_base, zeta_base, beam, simul_path)
 
-    label = beam.name
     print(f'Creating GIF for {label}')
     print('rho_array: ', rho_array.shape)
     print('zeta_array: ', zeta_array.shape)
@@ -890,7 +832,6 @@ def CreateGif_density(T: float, dMOT: float, beam: Beam, middle_folder='', fname
         beam=beam,
         file_name=f'density_gif_Beam={label}',
         intensity_grid=intensity_grid,
-        beam_label=label,
     )
 
 if __name__ == '__main__':
@@ -980,6 +921,6 @@ if __name__ == '__main__':
         # plt.show()
 
         beam = Get_Beam(simul_path)
-        CreateGif_density(simul_path, beam, beam_label=beam_name)
+        CreateGif_density(T, dMOT, beam, middle_folder='Heating' if Heating else '')
     except Exception as e:
         print(e)

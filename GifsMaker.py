@@ -10,7 +10,6 @@ def MakeGif_density(
     beam=GaussianBeam(),
     file_name='density_vs_time',
     intensity_grid=None,
-    beam_label=None,
 ):
     """
     Create a GIF animation of atomic density over time.
@@ -28,8 +27,7 @@ def MakeGif_density(
     fig, ax = plt.subplots(figsize=(7, 10))
 
     density_max = float(np.max(density))
-    if density_max <= 0.0:
-        density_max = 1.0
+    assert density_max > 0.0, "Density values must be positive."
 
     # --- Density overlay with transparency ---
     img_density = ax.imshow(
@@ -44,6 +42,7 @@ def MakeGif_density(
     
     # --- Beam intensity as background ---
     if intensity_grid is None:
+        # this means that the beam intensity is from a Beam object, not from a FieldLUT
         rho_dim = R / (w0 * 1e3)
         zeta_dim = Z / (beam.zR * 1e3)
         I = beam.intensity(rho_dim, zeta_dim)
@@ -67,7 +66,7 @@ def MakeGif_density(
     sm.set_array([])  
     fig.colorbar(sm, ax=ax, label="Beam intensity")
 
-    label = beam_label if beam_label is not None else beam.name
+    label = "LUT" if intensity_grid is not None else beam.name
     ax.set_title(f'Density and Intensity distribution ({label})')
     ax.set_xlabel(r'$\rho$ (mm)')
     ax.set_ylabel('z (mm)')
