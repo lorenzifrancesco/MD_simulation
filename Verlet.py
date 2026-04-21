@@ -6,12 +6,11 @@ from Beams import *
 
 def _coerce_state(x0, v0):
     """
-    Convert a  or many-particle state to the integrator layout.
+    Convert the initial state (list of positions and velocitied) to match the integrator layout.
 
     The integrators expect state arrays with shape (D, N), where D is the
     number of coordinates and N is the number of atoms. A one-dimensional
     input is treated as one atom and reshaped from (D,) to (D, 1).
-
     """
     x0 = np.asarray(x0, dtype=float)
     v0 = np.asarray(v0, dtype=float)

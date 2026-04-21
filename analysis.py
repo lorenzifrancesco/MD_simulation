@@ -6,8 +6,6 @@ import os
 import re
 import h5py
 from scipy.ndimage import map_coordinates
-import h5py
-from scipy.ndimage import map_coordinates
 from Beams import beams
 from Heating import GetTemperature
 from GifsMaker import MakeGif_density
@@ -35,8 +33,6 @@ def _finalize_plot(name):
 
 def data_fname(T, dMOT, beam_name, middle_folder=''):
     res_fname = f'res_T={T:.0f}uK_dMOT={dMOT:.0f}mm/'
-    if middle_folder == '':
-        simul_path = data_folder + f'{beam_name}/{res_fname}'
     if middle_folder == '':
         simul_path = data_folder + f'{beam_name}/{res_fname}'
     else:
@@ -247,9 +243,6 @@ def Get_Beam(simul_path: str):
     beam.Set_Power(P_b)
     beam.Set_Lambda(Lambda_b)
     beam.Set_w0(w0_b)
-    beam.update_props()
-
-    beam.Set_Power(P_b)
     beam.update_props()
 
     return beam
