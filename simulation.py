@@ -753,15 +753,15 @@ if __name__ == '__main__':
             if use_lut_mode:
                 print(f"LUT mode enabled (base beam: {base_beam_name})")
         else:
-            # --- enable LUT-based intensity for speed (SciPy-backed) ---
+            # --- enable cached analytic intensity for speed (SciPy-backed) ---
             # tune these bounds / resolutions as needed
-            beam.enable_intensity_lut(
-                rho_max=2.0,    # dimensionless rho range you care about
+            beam.enable_intensity_cache(
+                rho_max=2.0,
                 Nrho=10000,
-                zeta_min=0.0,   # use negative if particles explore zeta < 0
+                zeta_min=0.0,
                 zeta_max=2.0,
                 Nzeta=10000,
-            ) # with this LUT complexity, in 3D we would obtain a 500x500x500 grid
+            )
     # exit()
     except Exception as e:
         print(
