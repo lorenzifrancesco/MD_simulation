@@ -16,11 +16,11 @@ class Beam:
         self.lambda_b = lambda_b
         self.w0_b = w0_b
 
-        # LUT-related attributes for intensity(rho, zeta)
-        self._use_intensity_lut = False
-        self._rho_lut = None
-        self._zeta_lut = None
-        self._I_lut = None
+        # Cache-related attributes for intensity(rho, zeta)
+        self._use_intensity_cache = False
+        self._rho_cache = None
+        self._zeta_cache = None
+        self._I_cache = None
         self._drho = None
         self._dzeta = None
 
@@ -69,14 +69,15 @@ class Beam:
 
     def intensity(self, rho, zeta):
         """
-        Uses LUT when enabled, otherwise falls back to analytic formula.
+        Uses cached intensity when enabled, otherwise falls back to the
+        analytic formula.
         """
-        if self._use_intensity_lut:
-            return self._intensity_from_lut(rho, zeta)
+        if self._use_intensity_cache:
+            return self._intensity_from_cache(rho, zeta)
         return self.intensity_analytic(rho, zeta)
 
-    # --- LUT utilities -------------------------------------------------
-    def enable_intensity_lut(
+    # --- Intensity cache utilities -------------------------------------
+    def enable_intensity_cache(
         self,
         rho_max=4.0,
         Nrho=256,
@@ -85,8 +86,8 @@ class Beam:
         Nzeta=256,
     ):
         """
-        Precompute a 2D lookup table for intensity I(rho, zeta)
-        on a regular grid and enable fast interpolation.
+        Precompute a 2D cache for analytic intensity I(rho, zeta) on a
+        regular grid and enable fast interpolation.
 
         Assumes cylindrical symmetry. TODO: implement also the asymmetric case.
         """
@@ -94,33 +95,33 @@ class Beam:
         zeta = np.linspace(zeta_min, zeta_max, Nzeta)
         R, Z = np.meshgrid(rho, zeta, indexing="ij")
         I = self.intensity_analytic(R, Z)
-        # print(sys.getsizeof(I)/(1e6)) # this is the size of the LUT in MB
+        # print(sys.getsizeof(I)/(1e6)) # this is the size of the cache in MB
         
-        self._rho_lut = rho
-        self._zeta_lut = zeta
-        self._I_lut = I
+        self._rho_cache = rho
+        self._zeta_cache = zeta
+        self._I_cache = I
         self._drho = rho[1] - rho[0]
         self._dzeta = zeta[1] - zeta[0]
-        self._use_intensity_lut = True
+        self._use_intensity_cache = True
 
-    def disable_intensity_lut(self):
-        """Disable the LUT usage and free the vars."""
-        self._use_intensity_lut = False
-        self._rho_lut = None
-        self._zeta_lut = None
-        self._I_lut = None
+    def disable_intensity_cache(self):
+        """Disable the analytic intensity cache and free the arrays."""
+        self._use_intensity_cache = False
+        self._rho_cache = None
+        self._zeta_cache = None
+        self._I_cache = None
         self._drho = None
         self._dzeta = None
 
-    def _intensity_from_lut(self, rho, zeta):
+    def _intensity_from_cache(self, rho, zeta):
         """
-        Use scipy.ndimage.map_coordinates to interpolate from the LUT.
+        Use scipy.ndimage.map_coordinates to interpolate from the cache.
 
         rho, zeta can be scalars or arrays; broadcasting is supported.
-        Outside the LUT domain we return 0 (via mode="constant").
+        Outside the cache domain we return 0 (via mode="constant").
         """
-        if not self._use_intensity_lut or self._I_lut is None:
-            raise RuntimeError("Intensity LUT is not enabled")
+        if not self._use_intensity_cache or self._I_cache is None:
+            raise RuntimeError("Intensity cache is not enabled")
 
         rho = np.asarray(rho)
         zeta = np.asarray(zeta)
@@ -129,16 +130,16 @@ class Beam:
         shape = rho_b.shape
 
         rho_abs = np.abs(rho_b)
-        rho0 = self._rho_lut[0]
-        zeta0 = self._zeta_lut[0]
+        rho0 = self._rho_cache[0]
+        zeta0 = self._zeta_cache[0]
 
-        # fractional indices in LUT space
+        # fractional indices in cache space
         ir = (rho_abs - rho0) / self._drho
         iz = (zeta_b - zeta0) / self._dzeta
 
         coords = np.vstack([ir.ravel(), iz.ravel()])
         I_flat = map_coordinates(
-            self._I_lut,
+            self._I_cache,
             coords,
             order=1,          # linear interpolation
             mode="constant",  # outside grid -> cval
@@ -188,7 +189,7 @@ class GaussianBeam(Beam):
         return b * np.exp(-2 * b * rho**2)  # hot line
 
     # intensity() inherited from Beam:
-    #   -> uses LUT if enabled, otherwise intensity_analytic
+    #   -> uses cache if enabled, otherwise intensity_analytic
 
     def acc(self, x):
         """
@@ -200,7 +201,7 @@ class GaussianBeam(Beam):
 
         # Compute beta and intensity ONCE
         b = self.beta(zeta)
-        I = self.intensity(rho, zeta)   # single analytic or LUT call
+        I = self.intensity(rho, zeta)   # single analytic or cache call
 
         # du/drho = 4 b rho I
         du_drho = 4.0 * b * rho * I
@@ -225,7 +226,7 @@ class LGBeamL1(Beam):
     def __init__(self, P_b=1, lambda_b=532e-9, w0_b=19e-6):
         super().__init__("LG", P_b, lambda_b, w0_b)
 
-    # intensity() inherited from Beam: LUT if enabled, else analytic
+    # intensity() inherited from Beam: cache if enabled, else analytic
     def intensity_analytic(self, rho, zeta):
         b = self.beta(zeta)
         s = 2 * b * rho**2
@@ -264,16 +265,16 @@ beams = { # TODO it is probably a bit more robust to use an enum here
 # Example usage
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Example: enable LUT for Gaussian beam to speed intensity calls
+    # Example: enable cache for Gaussian beam to speed intensity calls
     # -> with a very coarse grid to demonstrate functionality
-    beams["Gauss"].enable_intensity_lut(
+    beams["Gauss"].enable_intensity_cache(
         rho_max=4.0,
         Nrho=5,
         zeta_min=0.0,
         zeta_max=4.0,
         Nzeta=5,
     )
-    beams["LG"].enable_intensity_lut(
+    beams["LG"].enable_intensity_cache(
         rho_max=4.0,
         Nrho=5,
         zeta_min=0.0,
@@ -289,8 +290,8 @@ if __name__ == "__main__":
         
     # ...and in full resolution
     
-    beams["Gauss"].disable_intensity_lut()
-    beams["LG"].disable_intensity_lut()
+    beams["Gauss"].disable_intensity_cache()
+    beams["LG"].disable_intensity_cache()
 
     for name, beam in beams.items():
         beam.plot_trans_intensity()
