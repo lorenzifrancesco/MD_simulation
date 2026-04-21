@@ -20,30 +20,6 @@ LUT_VERBOSE = False
 PLOT_MODE = "save"
 PLOT_DIR = "media"
 
-
-def _finalize_plot(name):
-    mode = PLOT_MODE
-    if mode not in ("save", "show", "both"):
-        raise ValueError("PLOT_MODE must be 'save', 'show', or 'both'")
-    if mode in ("save", "both"):
-        os.makedirs(PLOT_DIR, exist_ok=True)
-        out_path = os.path.join(PLOT_DIR, f"{name}.png")
-        plt.savefig(out_path, dpi=200)
-        print(f"Saved plot to {out_path}")
-    if mode in ("show", "both"):
-        plt.show()
-    plt.close()
-
-def data_fname(T, dMOT, beam_name, middle_folder=''):
-mpl.rcParams["text.usetex"] = False
-
-USE_LUT_INTENSITY = False
-LUT_H5_PATH = "input/field_data.h5"
-LUT_VERBOSE = False
-PLOT_MODE = "save"
-PLOT_DIR = "media"
-
-
 def _finalize_plot(name):
     mode = PLOT_MODE
     if mode not in ("save", "show", "both"):
@@ -902,7 +878,7 @@ def CreateGif_density(T: float, dMOT: float, beam: Beam, middle_folder='', fname
     if USE_LUT_INTENSITY:
         intensity_grid = _lut_intensity_grid(rho_base, zeta_base, beam, simul_path)
 
-    label = beam_label if beam_label is not None else beam.name
+    label = beam.name
     print(f'Creating GIF for {label}')
     print('rho_array: ', rho_array.shape)
     print('zeta_array: ', zeta_array.shape)

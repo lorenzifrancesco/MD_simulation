@@ -4,6 +4,7 @@ import numpy as np
 import os
 from Beams import GaussianBeam, LGBeamL1
 from FieldLUT import FieldLUT3D
+from tqdm import trange
 
 # MOT characteristics
 RMOT = 1e-3 # m
