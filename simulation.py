@@ -598,6 +598,293 @@ def _lut_acc_from_h5(
 
     return acc, lut_info
 
+
+def _make_res_folder(T, dMOT, beam_name, P_b, HEATING, output_beam_name=None):
+    if output_beam_name is None:
+        output_beam_name = beam_name
+    if Diff_Powers:
+        return (
+            data_folder
+            + f"{output_beam_name}/Different_Powers/"
+            f"res_T={T*1e6:.0f}uK_dMOT={dMOT*1e3:.0f}mm_P={P_b}W/"
+        )
+    if HEATING:
+        out_folder = output_beam_name + "/Heating"
+    else:
+        out_folder = output_beam_name
+    return data_folder + f"{out_folder}/res_T={T*1e6:.0f}uK_dMOT={dMOT*1e3:.0f}mm/"
+
+
+def _load_lut_intensity_planes(path, x_axis, y_axis, z_axis, axis_scale=1.0):
+    import h5py
+    from scipy.ndimage import map_coordinates
+
+    x_axis = np.asarray(x_axis, dtype=float)
+    y_axis = np.asarray(y_axis, dtype=float)
+    z_axis = np.asarray(z_axis, dtype=float)
+    axis_scale = float(axis_scale)
+
+    intensity_xz = np.zeros((x_axis.size, z_axis.size), dtype=float)
+    intensity_yz = np.zeros((y_axis.size, z_axis.size), dtype=float)
+
+    with h5py.File(path, "r") as f:
+        fields_group = f["fields"]
+        for idx in range(z_axis.size):
+            g = fields_group[f"z_{idx:05d}"]
+            x = np.asarray(g["x"][:], dtype=float) * axis_scale
+            y = np.asarray(g["y"][:], dtype=float) * axis_scale
+            intensity = np.asarray(g["intensity"][:], dtype=float)
+
+            dx = x[1] - x[0]
+            dy = y[1] - y[0]
+
+            ix = (x_axis - x[0]) / dx
+            iy0 = (0.0 - y[0]) / dy
+            coords_xz = np.vstack([ix, np.full_like(ix, iy0)])
+            intensity_xz[:, idx] = map_coordinates(
+                intensity,
+                coords_xz,
+                order=1,
+                mode="constant",
+                cval=0.0,
+                prefilter=False,
+            )
+
+            iy = (y_axis - y[0]) / dy
+            ix0 = (0.0 - x[0]) / dx
+            coords_yz = np.vstack([np.full_like(iy, ix0), iy])
+            intensity_yz[:, idx] = map_coordinates(
+                intensity,
+                coords_yz,
+                order=1,
+                mode="constant",
+                cval=0.0,
+                prefilter=False,
+            )
+
+    return intensity_xz, intensity_yz
+
+
+def _save_initial_condition_plot(x0, beam, lut_info=None, max_points=20000):
+    import matplotlib.pyplot as plt
+
+    plt.rcParams["text.usetex"] = False
+    x0 = np.asarray(x0)
+    if x0.ndim != 2 or x0.shape[0] < 2:
+        raise ValueError("x0 must have shape (2, N) for initial condition plot")
+    rho = x0[0]
+    zeta = x0[1]
+
+    if rho.size > max_points:
+        idx = np.random.choice(rho.size, size=max_points, replace=False)
+        rho = rho[idx]
+        zeta = zeta[idx]
+
+    if lut_info and "field" in lut_info and "path" in lut_info:
+        field = lut_info["field"]
+        axis_scale = lut_info.get("axis_scale") or 1.0
+        intensity_xz, intensity_yz = _load_lut_intensity_planes(
+            lut_info["path"],
+            field.x,
+            field.y,
+            field.z,
+            axis_scale=axis_scale,
+        )
+        s_r = lut_info["s_r"]
+        s_z = lut_info["s_z"]
+        x_axis = field.x / s_r
+        y_axis = field.y / s_r
+        z_axis = field.z / s_z
+    else:
+        x_span = float(np.max(rho) - np.min(rho))
+        z_span = float(np.max(zeta) - np.min(zeta))
+        pad = 0.1
+        x_axis = np.linspace(
+            float(np.min(rho) - pad * x_span),
+            float(np.max(rho) + pad * x_span),
+            200,
+        )
+        z_axis = np.linspace(
+            float(np.min(zeta) - pad * z_span),
+            float(np.max(zeta) + pad * z_span),
+            200,
+        )
+        X, Z = np.meshgrid(x_axis, z_axis, indexing="ij")
+        intensity_xz = beam.intensity(np.abs(X), Z)
+        intensity_yz = intensity_xz.copy()
+        y_axis = x_axis
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
+    for ax, axis_vals, intensity, label, horiz_label in (
+        (axes[0], x_axis, intensity_xz, "xz plane", "x (w0 units)"),
+        (axes[1], y_axis, intensity_yz, "yz plane", "y (w0 units)"),
+    ):
+        mesh = ax.pcolormesh(
+            axis_vals,
+            z_axis,
+            intensity.T,
+            shading="auto",
+            cmap="viridis",
+        )
+        ax.scatter(rho, zeta, s=3, alpha=0.25, edgecolors="none", color="white")
+        ax.set_xlabel(horiz_label)
+        ax.set_ylabel("zeta (zR units)")
+        ax.set_title(f"Initial condition ({label})")
+        fig.colorbar(mesh, ax=ax, label="Intensity")
+
+    os.makedirs("media", exist_ok=True)
+    out_path = os.path.join("media", "initial_condition.png")
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def _lut_acc_from_h5(
+    path,
+    beam,
+    r_ref=R_trap,
+    expected_axis_unit="r_F",
+    expected_axis_scale=1.0,
+    acc_scale=1.0,
+    required_rho=None,
+    required_zeta=None,
+    auto_scale=False,
+    grid_pad=0.02,
+    outside_mode="gravity",
+    warn_outside=True,
+):
+    field = FieldLUT3D.from_field_data_h5(
+        path=path,
+        expected_axis_unit=expected_axis_unit,
+        expected_axis_scale=expected_axis_scale,
+        acc_scale=acc_scale,
+    )
+    field_unit = expected_axis_unit
+
+    r_ref = float(r_ref)
+    if not np.isfinite(r_ref) or r_ref <= 0.0:
+        raise ValueError("r_ref must be a positive finite number")
+
+    if field.y[0] > 0.0 or field.y[-1] < 0.0:
+        raise ValueError("LUT y-axis does not include 0; cannot slice at y=0")
+
+    grid_pad = float(grid_pad)
+    if grid_pad < 0.0 or grid_pad >= 1.0:
+        raise ValueError("grid_pad must be in [0, 1)")
+
+    r_ref_min = r_ref
+    x_lim = None
+    if field.x[0] < 0.0 < field.x[-1]:
+        x_lim = min(-field.x[0], field.x[-1]) * (1.0 - grid_pad)
+
+    if required_rho is not None:
+        rho_min, rho_max = (float(required_rho[0]), float(required_rho[1]))
+        max_abs_rho = max(abs(rho_min), abs(rho_max))
+        if x_lim is None:
+            raise ValueError("LUT x-axis does not straddle 0; cannot map rho")
+        if max_abs_rho > 0.0:
+            r_ref_min = max(r_ref_min, beam.w0_b * max_abs_rho / x_lim)
+
+    if required_zeta is not None:
+        zeta_min, zeta_max = (float(required_zeta[0]), float(required_zeta[1]))
+        if zeta_min < 0.0 and field.z[0] >= 0.0:
+            raise ValueError("LUT z-axis does not include negative zeta values")
+        max_abs_zeta = max(abs(zeta_min), abs(zeta_max))
+        if max_abs_zeta > 0.0:
+            z_lim = max(abs(field.z[0]), abs(field.z[-1])) * (1.0 - grid_pad)
+            r_ref_min = max(r_ref_min, beam.zR * max_abs_zeta / z_lim)
+
+    if r_ref_min > r_ref * (1.0 + 1e-6):
+        if auto_scale:
+            r_ref_min *= 1.0 + grid_pad
+            print(
+                "WARNING: LUT coverage too small; increasing r_ref from "
+                f"{r_ref:.3e} to {r_ref_min:.3e} to fit domain."
+            )
+            r_ref = r_ref_min
+        else:
+            print(
+                "WARNING: LUT coverage too small for requested domain. "
+                "Proceeding without rescaling; outside mode will apply."
+            )
+
+    s_r = beam.w0_b / r_ref
+    s_z = beam.zR / r_ref
+    if s_r <= 0.0 or s_z <= 0.0:
+        raise ValueError("Invalid scale factors for LUT mapping")
+
+    tol_x = 1e-6 * max(1.0, float(np.max(np.abs(field.x))))
+    tol_z = 1e-6 * max(1.0, float(np.max(np.abs(field.z))))
+
+    outside_mode = str(outside_mode).lower()
+    if outside_mode not in ("zero", "gravity", "error"):
+        raise ValueError("outside_mode must be 'zero', 'gravity', or 'error'")
+    warned = False
+
+    def acc(x):
+        nonlocal warned
+        rho, zeta = x
+        x_field = rho * s_r
+        z_field = zeta * s_z
+
+        inside = (
+            (x_field >= field.x[0] - tol_x)
+            & (x_field <= field.x[-1] + tol_x)
+            & (z_field >= field.z[0] - tol_z)
+            & (z_field <= field.z[-1] + tol_z)
+        )
+
+        if outside_mode == "error" and np.any(~inside):
+            x_min = float(np.min(x_field))
+            x_max = float(np.max(x_field))
+            z_min = float(np.min(z_field))
+            z_max = float(np.max(z_field))
+            raise ValueError(
+                "LUT coverage too small for requested domain "
+                f"(x_field {x_min:.3g}..{x_max:.3g} vs "
+                f"{field.x[0]:.3g}..{field.x[-1]:.3g}, "
+                f"z_field {z_min:.3g}..{z_max:.3g} vs "
+                f"{field.z[0]:.3g}..{field.z[-1]:.3g})"
+            )
+        if warn_outside and not warned and np.any(~inside):
+            warned = True
+            print("WARNING: particles outside LUT domain, using fallback mode.")
+
+        pos = np.vstack([x_field, np.zeros_like(x_field), z_field])
+        acc_cart = field.acc(pos)
+        acc_rho = acc_cart[0] / s_r
+        acc_zeta = acc_cart[2] / s_z
+        if outside_mode == "zero":
+            acc_rho = np.where(inside, acc_rho, 0.0)
+            acc_zeta = np.where(inside, acc_zeta, 0.0)
+            acc_zeta = acc_zeta - g / beam.as_zeta * inside
+        elif outside_mode == "gravity":
+            acc_zeta = acc_zeta - g / beam.as_zeta
+            acc_zeta = np.where(inside, acc_zeta, -g / beam.as_zeta)
+        else:
+            acc_zeta = acc_zeta - g / beam.as_zeta
+        return np.vstack([acc_rho, acc_zeta])
+
+    rho_min, rho_max = required_rho if required_rho is not None else (np.nan, np.nan)
+    zeta_min, zeta_max = required_zeta if required_zeta is not None else (np.nan, np.nan)
+    lut_info = {
+        "grid": (field.x.size, field.y.size, field.z.size),
+        "field": field,
+        "axis_unit": field_unit,
+        "x_range": (float(field.x[0]), float(field.x[-1])),
+        "y_range": (float(field.y[0]), float(field.y[-1])),
+        "z_range": (float(field.z[0]), float(field.z[-1])),
+        "rho_range": (float(rho_min), float(rho_max)),
+        "zeta_range": (float(zeta_min), float(zeta_max)),
+        "x_req_range": (float(rho_min * s_r), float(rho_max * s_r)),
+        "z_req_range": (float(zeta_min * s_z), float(zeta_max * s_z)),
+        "r_ref": float(r_ref),
+        "s_r": float(s_r),
+        "s_z": float(s_z),
+        "outside_mode": outside_mode,
+    }
+
+    return acc, lut_info
+
 def print_simulation_parameters(
     N, T, dMOT, RMOT,
     w0, zR, tau,

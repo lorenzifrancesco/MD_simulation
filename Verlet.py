@@ -31,6 +31,33 @@ def _below_zmin(xs, z_index, z_min):
     return np.min(xs[z_index]) < z_min
 
 
+def _coerce_state(x0, v0):
+    x0 = np.asarray(x0, dtype=float)
+    v0 = np.asarray(v0, dtype=float)
+
+    if x0.ndim == 1:
+        x0 = x0[:, None]
+    if v0.ndim == 1:
+        v0 = v0[:, None]
+    if x0.ndim != 2 or v0.ndim != 2:
+        raise ValueError("x0 and v0 must have shape (D, N)")
+    if x0.shape != v0.shape:
+        raise ValueError("x0 and v0 must have the same shape")
+    return x0, v0
+
+
+def _active_mask(xs, z_index):
+    if z_index is None:
+        return np.ones(xs.shape[1], dtype=bool)
+    return xs[z_index] > 0.0
+
+
+def _below_zmin(xs, z_index, z_min):
+    if z_index is None:
+        return False
+    return np.min(xs[z_index]) < z_min
+
+
 def Heating_1(xs, vs, dt, i, beam=GaussianBeam()):
     sigma_i_rho, sigma_i_zeta = np.std(vs[i], axis=1) # std across atoms
     r_atoms = xs[i]

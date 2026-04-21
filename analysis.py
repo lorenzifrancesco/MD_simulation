@@ -6,6 +6,8 @@ import os
 import re
 import h5py
 from scipy.ndimage import map_coordinates
+import h5py
+from scipy.ndimage import map_coordinates
 from Beams import beams
 from Heating import GetTemperature
 from GifsMaker import MakeGif_density
@@ -33,7 +35,32 @@ def _finalize_plot(name):
     plt.close()
 
 def data_fname(T, dMOT, beam_name, middle_folder=''):
+mpl.rcParams["text.usetex"] = False
+
+USE_LUT_INTENSITY = False
+LUT_H5_PATH = "input/field_data.h5"
+LUT_VERBOSE = False
+PLOT_MODE = "save"
+PLOT_DIR = "media"
+
+
+def _finalize_plot(name):
+    mode = PLOT_MODE
+    if mode not in ("save", "show", "both"):
+        raise ValueError("PLOT_MODE must be 'save', 'show', or 'both'")
+    if mode in ("save", "both"):
+        os.makedirs(PLOT_DIR, exist_ok=True)
+        out_path = os.path.join(PLOT_DIR, f"{name}.png")
+        plt.savefig(out_path, dpi=200)
+        print(f"Saved plot to {out_path}")
+    if mode in ("show", "both"):
+        plt.show()
+    plt.close()
+
+def data_fname(T, dMOT, beam_name, middle_folder=''):
     res_fname = f'res_T={T:.0f}uK_dMOT={dMOT:.0f}mm/'
+    if middle_folder == '':
+        simul_path = data_folder + f'{beam_name}/{res_fname}'
     if middle_folder == '':
         simul_path = data_folder + f'{beam_name}/{res_fname}'
     else:
@@ -41,6 +68,63 @@ def data_fname(T, dMOT, beam_name, middle_folder=''):
     if os.path.exists(simul_path):
         return simul_path
     print(f'No simulation present at {simul_path}')
+    if os.path.exists(simul_path):
+        return simul_path
+    print(f'No simulation present at {simul_path}')
+
+
+def _lut_intensity_grid(rho_array, zeta_array, beam, simul_path):
+    r_ref = GetParam(simul_path, param="r_ref")
+    if r_ref is None:
+        raise ValueError("r_ref not found in parameters.txt")
+
+    s_r = beam.w0_b / r_ref
+    s_z = beam.zR / r_ref
+
+    rho_array = np.asarray(rho_array, dtype=float)
+    zeta_array = np.asarray(zeta_array, dtype=float)
+    x_field = np.abs(rho_array) * s_r
+    z_field = zeta_array * s_z
+
+    with h5py.File(LUT_H5_PATH, "r") as f:
+        axis_scale = float(f.attrs.get("axis_scale", 1.0))
+        if LUT_VERBOSE and not getattr(_lut_intensity_grid, "_logged", False):
+            _lut_intensity_grid._logged = True
+            print(
+                "LUT intensity enabled:",
+                f"path={LUT_H5_PATH}, axis_scale={axis_scale}, r_ref={r_ref:.3g}",
+            )
+        z_axis = np.asarray(f["domain/z"][:], dtype=float) * axis_scale
+        fields_group = f["fields"]
+
+        intensity_xz = np.empty((z_axis.size, x_field.size), dtype=float)
+        for idx in range(z_axis.size):
+            g = fields_group[f"z_{idx:05d}"]
+            x = np.asarray(g["x"][:], dtype=float) * axis_scale
+            y = np.asarray(g["y"][:], dtype=float) * axis_scale
+            intensity = np.asarray(g["intensity"][:], dtype=float)
+
+            dx = x[1] - x[0]
+            dy = y[1] - y[0]
+            ix = (x_field - x[0]) / dx
+            iy0 = (0.0 - y[0]) / dy
+            coords = np.vstack([ix, np.full_like(ix, iy0)])
+            intensity_xz[idx, :] = map_coordinates(
+                intensity,
+                coords,
+                order=1,
+                mode="constant",
+                cval=0.0,
+                prefilter=False,
+            )
+
+    intensity = np.empty((z_field.size, x_field.size), dtype=float)
+    for j in range(x_field.size):
+        intensity[:, j] = np.interp(
+            z_field, z_axis, intensity_xz[:, j], left=0.0, right=0.0
+        )
+    return intensity
+
 
 
 def _lut_intensity_grid(rho_array, zeta_array, beam, simul_path):
