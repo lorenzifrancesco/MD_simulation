@@ -5,25 +5,46 @@ import matplotlib as mpl
 import os
 import re
 from Beams import beams
+from FieldLUT import FieldLUT3D
 from Heating import GetTemperature
 from GifsMaker import MakeGif_density
 
-def  data_fname(T, dMOT, beam_name, middle_folder=''):
-    
-    res_fname = f'res_T={T:.0f}uK_dMOT={dMOT:.0f}mm/'
+mpl.rcParams["text.usetex"] = False
 
-    if middle_folder=='':
-        simul_path =  data_folder + f'{beam_name}/{res_fname}'
-        if os.path.exists(simul_path):
-            return simul_path
-        else:
-            print(f'No simulation present at {simul_path}')
+USE_LUT_INTENSITY = False
+LUT_H5_PATH = "input/field_data.h5"
+LUT_VERBOSE = False
+PLOT_MODE = "save"
+PLOT_DIR = "media"
+
+def _finalize_plot(name):
+    mode = PLOT_MODE
+    if mode not in ("save", "show", "both"):
+        raise ValueError("PLOT_MODE must be 'save', 'show', or 'both'")
+    if mode in ("save", "both"):
+        os.makedirs(PLOT_DIR, exist_ok=True)
+        out_path = os.path.join(PLOT_DIR, f"{name}.png")
+        plt.savefig(out_path, dpi=200)
+        print(f"Saved plot to {out_path}")
+    if mode in ("show", "both"):
+        plt.show()
+    plt.close()
+
+def data_fname(T, dMOT, beam_name, middle_folder=''):
+    res_fname = f'res_T={T:.0f}uK_dMOT={dMOT:.0f}mm/'
+    if middle_folder == '':
+        simul_path = data_folder + f'{beam_name}/{res_fname}'
     else:
         simul_path = data_folder + f'{beam_name}/{middle_folder}/{res_fname}/'
-        if os.path.exists(simul_path):
-            return simul_path
-        else:
-            print(f'No simulation present at {simul_path}')
+    if os.path.exists(simul_path):
+        return simul_path
+    print(f'No simulation present at {simul_path}')
+
+def _field_intensity_grid(rho_array, zeta_array, beam, simul_path):
+    path = os.fspath(LUT_H5_PATH)
+    field = FieldLUT3D.from_field_data_h5(path, keep_intensity=True)
+    return field.intensity_grid(rho_array, zeta_array, beam, r_ref)
+
 
 def LoadTime(simul_path: str):
     """
@@ -112,6 +133,8 @@ def GetParam(simul_path: str, param: str):
     
     pattern = rf'({escaped_param}).*?:?\s*([+-]?\d+\.?\d*(?:[Ee][+-]?\d+)?)'
 
+    if simul_path is None:
+        simul_path = data_fname(T, dMOT, beam_name)
     file_content = get_file_content(simul_path + 'parameters.txt')
 
     match = re.search(pattern, file_content, re.IGNORECASE)
@@ -172,9 +195,6 @@ def Get_Beam(simul_path: str):
     beam.Set_Power(P_b)
     beam.Set_Lambda(Lambda_b)
     beam.Set_w0(w0_b)
-    beam.update_props()
-
-    beam.Set_Power(P_b)
     beam.update_props()
 
     return beam
@@ -662,9 +682,12 @@ def plot_density(simul_path: str, n, rho_array, zeta_array):
     fig.colorbar(cp, ax=ax, label="Atomic Density")
 
     # beam intensity (normalized)
-    rho_dim = R / (beam.w0_b * 1e3)
-    zeta_dim = Z / (beam.zR * 1e3)
-    I = beam.intensity(rho_dim, zeta_dim)
+    if USE_LUT_INTENSITY:
+        I = _field_intensity_grid(rho_array, zeta_array, beam, simul_path)
+    else:
+        rho_dim = R / (beam.w0_b * 1e3)
+        zeta_dim = Z / (beam.zR * 1e3)
+        I = beam.intensity(rho_dim, zeta_dim)
     I = I / I.max()
 
     # overlay with alpha
@@ -716,9 +739,10 @@ def plot_temperature(simul_path: str):
     plt.grid()
     plt.legend()
 
-def CreateGif_desnity(T: float, dMOT: float, beam: Beam, middle_folder=''):
+def CreateGif_density(T: float, dMOT: float, beam: Beam, middle_folder='', fname=''):
 
-    simul_path = data_fname(T, dMOT, beam.name, middle_folder)
+    label = "LUT" if USE_LUT_INTENSITY else beam.name
+    simul_path = data_fname(T, dMOT, label, middle_folder)
 
     xs= LoadPosition(simul_path)
     z_max = np.max(xs[:, 1, :])
@@ -736,47 +760,81 @@ def CreateGif_desnity(T: float, dMOT: float, beam: Beam, middle_folder=''):
     zeta_array = np.array(zeta_list)
     n_array = np.array(n_list)
 
-    print(f'Creating GIF for T = {T} uK, dMOT = {dMOT} mm, Beam = {beam_name}')
+    rho_base = rho_array[0]
+    zeta_base = zeta_array[0]
+    intensity_grid = None
+    if USE_LUT_INTENSITY:
+        intensity_grid = _field_intensity_grid(rho_base, zeta_base, beam, simul_path)
+
+    print(f'Creating GIF for {label}')
     print('rho_array: ', rho_array.shape)
     print('zeta_array: ', zeta_array.shape)
     print('n_array: ', n_array.shape)
 
-    MakeGif_density(pos=np.array([rho_array, zeta_array]), density=n_array, beam=beam, file_name=f'density_gif_T={T}uK_dMOT={dMOT}mm_Beam={beam_name}')
+    MakeGif_density(
+        pos=np.array([rho_base, zeta_base]),
+        density=n_array,
+        beam=beam,
+        file_name=f'density_gif_Beam={label}',
+        intensity_grid=intensity_grid,
+    )
 
 if __name__ == '__main__':
 
     from sys import argv
 
-    if len(argv) < 4:
-        print('Specify T, dMOT, Beam (Gauss or LG)')
+    if len(argv) < 3:
+        print('Specify T, dMOT, Beam (Gauss, LG, or LUT)')
         exit()
 
     try:
         T = int(argv[1])
         dMOT = int(argv[2])
         beam_name = str(argv[3])
-        Heating = False
-
-        if len(argv) == 5:
-            Heating = bool(argv[4])
+        if len(argv) > 4:
+            token = str(argv[4]).strip().lower()
+            if token in ("1", "true"):
+                Heating = True
+            elif token in ("0", "false", ""):
+                Heating = False
+            else:
+                raise ValueError("Heating must be True/False or 1/0")
+        else:
+            Heating = False
 
         print(f'T = {T} uK, dMOT = {dMOT} mm, beam = {beam_name}, Heating = {Heating}\n')
+
+        plot_mode = os.environ.get("PLOT_MODE", PLOT_MODE).strip().lower()
+        plot_dir = os.environ.get("PLOT_DIR", PLOT_DIR).strip()
+        if plot_dir:
+            PLOT_DIR = plot_dir
+        PLOT_MODE = plot_mode if plot_mode else PLOT_MODE
+
+        if beam_name == "LUT":
+            USE_LUT_INTENSITY = True
+            LUT_VERBOSE = True
+            LUT_H5_PATH = os.environ.get("FIELD_LUT_H5", LUT_H5_PATH)
+            if not os.path.exists(LUT_H5_PATH):
+                raise FileNotFoundError(f"LUT file not found: {LUT_H5_PATH}")
+            print(f"Analysis using LUT intensity from {LUT_H5_PATH}")
 
         simul_path = data_fname(T, dMOT, beam_name)
         if Heating:
             simul_path = data_fname(T, dMOT, beam_name, 'Heating')
+        if simul_path is None:
+            raise FileNotFoundError("Simulation folder not found; check inputs.")
 
         plot_cap_frac(simul_path)
-        plt.show()
+        _finalize_plot("cap_frac")
 
         hist_rho_step, hist_rho_init = density_at_fib(simul_path, step=-1)
         plot_initial_density_rho(hist_rho_init)
         plot_density_at_fib(hist_rho_step=hist_rho_step)
-        plt.show()
+        _finalize_plot("rho_density")
 
         plot_density_zeta_vs_t(simul_path)
         plt.ylim(0, 1)
-        plt.show()
+        _finalize_plot("zeta_vs_t")
 
         steps=np.array([-1])
         f_cap = get_frac(simul_path, steps)*100 # %
@@ -785,21 +843,29 @@ if __name__ == '__main__':
         Nt = len(LoadTime(simul_path))
         n, rho_array, zeta_array = density(simul_path, rho_min=-1.5*RMOT/w0, rho_max=1.5*RMOT/w0, zeta_min=0, zeta_max=5, step=int(Nt/3))
         plot_density(simul_path, n, rho_array, zeta_array)
-        plt.show()
+        _finalize_plot("density_contour")
 
-        plot_capfrac_vs_P(beam_name)
-        plt.xlabel("Power (W)")
-        plt.ylabel("Final Captured Fraction (%)")
-        plt.title("Captured fraction vs Trapping PW")
-        plt.legend()
-        plt.grid()
-        plt.show()
+        # plot_capfrac_vs_P(beam_name)
+        # plt.xlabel("Power (W)")
+        # plt.ylabel("Final Captured Fraction (%)")
+        # plt.title("Captured fraction vs Trapping PW")
+        # plt.legend()
+        # plt.grid()
+        # plt.show()
 
-        plot_temperature(simul_path)
-        plt.show()
+        # plot_capfrac_vs_P(beam_name: str)
+        # plot_capfrac_vs_P(beam=LGBeamL1())
+        # plt.xlabel("Power (W)")
+        # plt.ylabel("Final Captured Fraction (%)")
+        # plt.title("Captured fraction vs Trapping PW")
+        # plt.legend()
+        # plt.grid()
+        # plt.show()
 
-        # beam = Get_Beam(simul_path)
-        # CreateGif_desnity(T, dMOT, beam)
+        # plot_temperature(T, dMOT, chosen_beam)
+        # plt.show()
 
+        beam = Get_Beam(simul_path)
+        CreateGif_density(T, dMOT, beam, middle_folder='Heating' if Heating else '')
     except Exception as e:
         print(e)
